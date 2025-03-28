@@ -5,9 +5,10 @@ import json
 import random
 import string
 import time
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, TaskSet
 import pandas as pd  # Pandas used for processing Excel files
 load_dotenv()
+from queue import Queue,Empty
 
 # Constants (replace with your settings)
 CONTACT_FOLDER = "./data"  # Folder containing Excel files
@@ -34,36 +35,44 @@ def preprocess_message(entry):
         "object": "whatsapp_business_account"
     }
 
-class LoadTestUser(HttpUser):
-    wait_time = between(1, 3)  # Simulate think time between requests
+
+
+
+class UserBehavior(TaskSet):
+    def on_start(self):
+        # Get a row of data for this user
+        if not self.user.data_queue.empty():
+            self.user.data = self.user.data_queue.get()
+            # Re-add data to queue to loop indefinitely (optional)
+            # self.user.data_queue.put(self.user.data)
 
     @task
-    def send_requests_from_excel(self):
-        if not EXCEL_FILES:
-            print("No Excel files found in the folder.")
-            return
+    def send_request(self):
 
-        for file in EXCEL_FILES:
-            file_path = os.path.join(CONTACT_FOLDER, file)
-            df = pd.read_excel(file_path)  # Read the Excel file
-            entries = df.to_dict(orient="records")  # Convert each row to a dictionary
+        # Example: Send a POST request with user-specific data
+        message = preprocess_message(self.user.data)
+        with self.client.post(
+                WEBHOOK_URL, json=message, catch_response=True
+        ) as response:
+            if response.status_code == 200:
+                response.success()
+            else:
+                response.failure(f"Failed with status {response.status_code}")
 
-            batch = []
-            for idx, entry in enumerate(entries):
-                message = preprocess_message(entry)
+        self.user.stop()
 
-                with self.client.post(
-                        WEBHOOK_URL, json=message, catch_response=True
-                ) as response:
-                    if response.status_code == 200:
-                        print(f"Success: {file} - Entry {idx} - Status {response.status_code}")
-                        response.success()
-                    else:
-                        print(f"Error: {file} - Entry {idx} - Status {response.status_code}")
-                        response.failure(f"Failed with status {response.status_code}")
-
-            print(f"Finished processing file: {file}")
-
-        # Save results to JSON (optional)
-        with open("report.json", "w") as report_file:
-            report_file.write(json.dumps({"processed_files": len(EXCEL_FILES)}, indent=2))
+class LoadTestUser(HttpUser):
+    tasks = [UserBehavior]
+    wait_time = between(1, 3)  # Simulate think time between requests
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Initialize data queue once per user class
+        if not hasattr(self.__class__, 'data_queue'):
+            self.__class__.data_queue = Queue()
+            for file in EXCEL_FILES:
+                file_path = os.path.join(CONTACT_FOLDER, file)
+                df = pd.read_excel(file_path)  # Read the Excel file
+                entries = df.to_dict(orient="records")
+                for idx, entry in enumerate(entries):
+                    self.__class__.data_queue.put(entry)
+            print("DATA SET LOADED")
